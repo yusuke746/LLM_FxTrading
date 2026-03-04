@@ -27,7 +27,7 @@ import pandas_ta as ta
 from config_manager import load_config, get, reload_config
 from logger_setup import setup_logger, get_logger
 from database import init_db
-from session.detector import get_current_session, is_market_open, Session
+from session.detector import get_current_session, is_market_open, Session, SERVER_TZ, JST
 from session.weights import get_engine_weights
 from engine.composite import calc_composite_signal
 from llm.filter_manager import LLMFilterManager
@@ -39,8 +39,6 @@ from optimizer.scheduler import OptimizationScheduler
 from notifier import DiscordNotifier
 from filters.entry_filters import EntryFilterManager
 from db_maintenance import DBMaintenance
-
-JST = pytz.timezone("Asia/Tokyo")
 
 # グローバル停止フラグ
 _running = True
@@ -78,6 +76,7 @@ class FXTradingBot:
 
         self._last_bar_time: Optional[datetime] = None
         self._dashboard_process: Optional[subprocess.Popen] = None
+        self._weekend_closed: bool = False  # 週末クローズ済みフラグ
 
     def start(self):
         """メインループを開始"""
@@ -142,6 +141,8 @@ class FXTradingBot:
         try:
             while _running:
                 try:
+                    # 週末クローズチェック（金曜 23:00 サーバー時間以降に全決済）
+                    self._check_weekend_close()
                     self._main_cycle()
                 except Exception as e:
                     self.logger.error(f"メインサイクルエラー: {e}", exc_info=True)
@@ -227,6 +228,13 @@ class FXTradingBot:
             self._manage_existing_positions()
             return
 
+        # 週末クローズ前は新規エントリー停止（金曜 22:00 サーバー時間以降 = クローズ2時間前）
+        now_server = datetime.now(SERVER_TZ)
+        if now_server.weekday() == 4 and now_server.hour >= 22:
+            self.logger.info("週末クローズ前: 新規エントリー停止（ポジション管理のみ実行）")
+            self._manage_existing_positions()
+            return
+
         # リスクチェック
         account = self.executor.get_account_info()
         if account:
@@ -276,8 +284,13 @@ class FXTradingBot:
         atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
         current_atr = atr_series.iloc[-1]
 
-        if current_atr is None or current_atr <= 0:
+        if current_atr is None or current_atr <= 0 or (hasattr(current_atr, '__class__') and str(current_atr) == 'nan'):
             self.logger.warning("ATRが無効 → エントリー見送り")
+            return
+
+        import math
+        if math.isnan(current_atr):
+            self.logger.warning("ATRがNaN → エントリー見送り")
             return
 
         # スプレッド取得（フィルター用）
@@ -399,12 +412,61 @@ class FXTradingBot:
                     reason=action.get("reason", "manager"),
                 )
                 if success:
+                    # 実際のPnLをMT5から取得してリスク管理に記録
+                    close_pnl = action.get("pnl", 0.0)
+                    self.risk_manager.record_trade_result(close_pnl)
                     self.position_manager.mark_closed(action["ticket"], action.get("reason", ""))
                     self.notifier.send_close_alert({
                         "ticket": action["ticket"],
-                        "pnl": 0,  # 実際のPnLはMT5から取得
+                        "pnl": close_pnl,
                         "reason": action.get("reason", "manager"),
                     })
+
+    def _check_weekend_close(self):
+        """週末クローズ前に全ポジションを自動決済（金曜 23:00 サーバー時間 = 市場クローズ1時間前）"""
+        now_server = datetime.now(SERVER_TZ)
+
+        # 金曜 23:00 サーバー時間以降 → 全ポジション決済（市場クローズ 24:00 の1時間前）
+        if now_server.weekday() == 4 and now_server.hour >= 23:
+            if not self._weekend_closed:
+                self._weekend_close_all()
+                self._weekend_closed = True
+        else:
+            # 金曜 23:00 前 or 他の曜日 → フラグリセット
+            self._weekend_closed = False
+
+    def _weekend_close_all(self):
+        """週末前の全ポジション決済"""
+        positions = self.executor.get_positions(self.symbol)
+        if not positions:
+            self.logger.info("週末クローズ: オープンポジションなし")
+            return
+
+        self.logger.warning(f"🔒 週末クローズ: {len(positions)}ポジションを全決済します")
+
+        closed_count = 0
+        total_pnl = 0.0
+
+        for pos in positions:
+            success = self.executor.close_position(pos.ticket, reason="weekend_close")
+            if success:
+                closed_count += 1
+                pnl = pos.profit  # MT5ポジションの損益
+                total_pnl += pnl
+                self.risk_manager.record_trade_result(pnl)
+                self.position_manager.mark_closed(pos.ticket, "weekend_close")
+                self.logger.info(f"  → ticket={pos.ticket} | PnL=¥{pnl:,.0f} | 決済完了")
+            else:
+                self.logger.error(f"  → ticket={pos.ticket} | 決済失敗 ❌")
+
+        self.notifier.send(
+            f"🔒 **週末全決済完了**\n"
+            f"決済数: {closed_count}/{len(positions)}ポジション\n"
+            f"合計PnL: ¥{total_pnl:,.0f}"
+        )
+        self.logger.warning(
+            f"週末クローズ完了: {closed_count}/{len(positions)}ポジション | 合計PnL=¥{total_pnl:,.0f}"
+        )
 
     def _shutdown(self):
         """安全なシャットダウン"""

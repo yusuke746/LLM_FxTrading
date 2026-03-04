@@ -25,7 +25,11 @@ class BacktestRunner:
     def __init__(self):
         self.point = 0.00001   # EUR/USD 1ポイント
         self.pip = 0.0001      # 1pip
-        self.pip_value = 10.0  # 1ロット1pip = $10
+        # JPY口座用: 1ロット1pip = $10 × USDJPYレート
+        # バックテストでは固定レートを使用
+        self.usdjpy_rate = 150.0  # バックテスト用固定レート
+        self.pip_value = 10.0 * self.usdjpy_rate  # 1ロット1pip = ¥1,500
+        self.max_lot = 30.0    # ロット上限
 
     def run(
         self,
@@ -118,10 +122,10 @@ class BacktestRunner:
                     tp_distance = current_atr * tp_mult
                     sl_pips = sl_distance / self.pip
 
-                    # ロットサイズ計算
-                    risk_amount = balance * risk_per_trade
-                    lot = risk_amount / (sl_pips * self.pip_value)
-                    lot = max(0.01, round(int(lot * 100) / 100, 2))
+                    # ロットサイズ計算（JPY口座対応）
+                    risk_amount = balance * risk_per_trade  # JPY
+                    lot = risk_amount / (sl_pips * self.pip_value)  # pip_valueはJPY
+                    lot = max(0.01, min(round(int(lot * 100) / 100, 2), self.max_lot))
 
                     entry_price = close[i]
                     if direction == "BUY":
@@ -151,14 +155,16 @@ class BacktestRunner:
                     unrealized = cur_price - entry_price
                     # SLチェック
                     if cur_low <= trail_sl:
-                        pnl = (trail_sl - entry_price) * remaining_lot * 100000
+                        pnl_pips = (trail_sl - entry_price) / self.pip
+                        pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
                         trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar})
                         in_trade = False
                         continue
                     # TPチェック
                     if cur_high >= trade_tp:
-                        pnl = (trade_tp - entry_price) * remaining_lot * 100000
+                        pnl_pips = (trade_tp - entry_price) / self.pip
+                        pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
                         trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar})
                         in_trade = False
@@ -166,13 +172,15 @@ class BacktestRunner:
                 else:
                     unrealized = entry_price - cur_price
                     if cur_high >= trail_sl:
-                        pnl = (entry_price - trail_sl) * remaining_lot * 100000
+                        pnl_pips = (entry_price - trail_sl) / self.pip
+                        pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
                         trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar})
                         in_trade = False
                         continue
                     if cur_low <= trade_tp:
-                        pnl = (entry_price - trade_tp) * remaining_lot * 100000
+                        pnl_pips = (entry_price - trade_tp) / self.pip
+                        pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
                         trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar})
                         in_trade = False
@@ -189,7 +197,8 @@ class BacktestRunner:
                 # STEP2: 部分利確
                 if be_set and not partial_done and unrealized >= trade_atr * partial_trigger:
                     partial_lot = round(remaining_lot * 0.5, 2)
-                    partial_pnl = unrealized * partial_lot * 100000
+                    partial_pnl_pips = unrealized / self.pip
+                    partial_pnl = partial_pnl_pips * partial_lot * self.pip_value
                     balance += partial_pnl
                     remaining_lot = round(remaining_lot - partial_lot, 2)
                     remaining_lot = max(remaining_lot, 0.01)

@@ -130,11 +130,11 @@ def update_trade(ticket: int, updates: Dict[str, Any]) -> None:
     """トレードを更新"""
     with get_connection() as conn:
         cursor = conn.cursor()
-        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         updates["updated_at"] = datetime.now().isoformat()
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         cursor.execute(
-            f"UPDATE trades SET {set_clause}, updated_at = ? WHERE ticket = ?",
-            list(updates.values()) + [updates["updated_at"], ticket],
+            f"UPDATE trades SET {set_clause} WHERE ticket = ?",
+            list(updates.values()) + [ticket],
         )
 
 

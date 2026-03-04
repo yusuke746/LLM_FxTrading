@@ -26,6 +26,7 @@ logger = get_logger("execution.mt5")
 
 JST = pytz.timezone("Asia/Tokyo")
 UTC = pytz.UTC
+SERVER_TZ = pytz.timezone("EET")  # XMTradingサーバー時間
 
 # MT5定数（MetaTrader5インポート前のフォールバック）
 ORDER_TYPE_BUY = 0
@@ -159,7 +160,9 @@ class MT5Executor:
                 return None
 
             df = pd.DataFrame(rates)
-            df["time"] = pd.to_datetime(df["time"], unit="s")
+            # Unixタイムスタンプ(UTC) → MT5サーバー時間(EET/EEST)に変換
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            df["time"] = df["time"].dt.tz_convert(SERVER_TZ).dt.tz_localize(None)
             df = df.rename(columns={
                 "time": "datetime",
                 "real_volume": "volume",
@@ -219,6 +222,15 @@ class MT5Executor:
             dict: 約定結果（ticket, price, etc.）
         """
         if not self._check_initialized():
+            return None
+
+        # 防御的ロット上限チェック（JPY口座安全弁）
+        MAX_LOT_SAFETY = 30.0
+        if lot_size > MAX_LOT_SAFETY:
+            logger.warning(f"ロットサイズ異常検知: {lot_size} → {MAX_LOT_SAFETY}にキャップ")
+            lot_size = MAX_LOT_SAFETY
+        if lot_size <= 0:
+            logger.error(f"ロットサイズが0以下: {lot_size} → 発注断念")
             return None
 
         price_info = self.get_current_price()

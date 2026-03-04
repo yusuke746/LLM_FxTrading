@@ -30,6 +30,37 @@ EURUSD_POINT = 0.00001   # 1ポイント = 0.00001
 EURUSD_PIP = 0.0001      # 1pip = 0.0001
 LOT_UNITS = 100000       # 1ロット = 10万通貨
 
+# ロットサイズ安全上限（XMTradingの上限は通常50ロット）
+MAX_LOT_SIZE = 30.0      # 安全マージンを取って30ロット
+
+# JPY口座用pip_value取得
+def _get_pip_value_jpy() -> float:
+    """
+    EUR/USD 1ロットあたりの1pip価値をJPYで返す
+    1pip = $10 per lot → $10 × USDJPYレート = JPY
+    MT5からUSDJPYレートを取得。失敗時はフォールバック値を使用。
+    """
+    try:
+        import MetaTrader5 as mt5
+        tick = mt5.symbol_info_tick("USDJPY")
+        if tick and tick.bid > 0:
+            usdjpy = tick.bid
+        else:
+            # フォールバック: EURUSDとEURJPYから逆算を試みる
+            eur_tick = mt5.symbol_info_tick("EURUSD")
+            eurjpy_tick = mt5.symbol_info_tick("EURJPY")
+            if eur_tick and eurjpy_tick and eur_tick.bid > 0:
+                usdjpy = eurjpy_tick.bid / eur_tick.bid
+            else:
+                usdjpy = 150.0  # 安全側のフォールバック
+                logger.warning(f"USDJPYレート取得失敗 → フォールバック値 {usdjpy} を使用")
+    except Exception:
+        usdjpy = 150.0
+        logger.warning(f"USDJPYレート取得例外 → フォールバック値 {usdjpy} を使用")
+    
+    pip_value_jpy = 10.0 * usdjpy  # $10 × USDJPYレート
+    return pip_value_jpy
+
 
 class RiskManager:
     """完全数式ベースのリスク管理マネージャー"""
@@ -63,10 +94,10 @@ class RiskManager:
         sl_pips: Optional[float] = None,
     ) -> float:
         """
-        リスク1%ルールに基づくロットサイズ算出
+        リスク1%ルールに基づくロットサイズ算出（JPY口座対応）
         
         Args:
-            balance: 口座残高（USD）
+            balance: 口座残高（JPY）
             atr: 現在のATR値
             sl_pips: SLまでのpips数（Noneの場合はATRベースで算出）
             
@@ -75,6 +106,12 @@ class RiskManager:
         """
         if self._halted or self._daily_halted:
             logger.warning("取引停止中 → ロットサイズ0")
+            return 0.0
+
+        # NaN / 無効ATRチェック
+        import math
+        if atr is None or math.isnan(atr) or atr <= 0:
+            logger.warning(f"ATRが無効({atr}) → ロットサイズ0")
             return 0.0
 
         # SL距離（pips）
@@ -97,20 +134,22 @@ class RiskManager:
             risk_pct *= 0.5   # 3連敗: 50%に縮小
             logger.info(f"3連敗 → リスク{risk_pct*100:.1f}%に縮小")
 
-        risk_amount = balance * risk_pct
+        risk_amount = balance * risk_pct  # JPY
 
-        # ロットサイズ = リスク金額 / (SLのpips数 × 1pipあたりの価値)
-        # EUR/USD 1ロット(10万通貨)で1pip = $10
-        pip_value_per_lot = 10.0  # USD
-        lot_size = risk_amount / (sl_pips * pip_value_per_lot)
+        # ロットサイズ = リスク金額(JPY) / (SLのpips数 × 1pipあたりの価値(JPY))
+        # EUR/USD 1ロット(10万通貨)で1pip = $10 × USDJPYレート = ¥JPY
+        pip_value_jpy = _get_pip_value_jpy()
+        lot_size = risk_amount / (sl_pips * pip_value_jpy)
 
         # 0.01ロット単位に切り捨て
-        lot_size = max(0.01, round(int(lot_size * 100) / 100, 2))
+        lot_size = int(lot_size * 100) / 100
+        lot_size = max(0.01, min(lot_size, MAX_LOT_SIZE))  # 上限キャップ
+        lot_size = round(lot_size, 2)
 
         logger.info(
-            f"ロットサイズ算出: 残高={balance:.0f} ATR={atr:.5f} "
-            f"SL={sl_pips:.1f}pips → {lot_size}lots "
-            f"(リスク: ${risk_amount:.2f} = {risk_pct*100:.2f}%)"
+            f"ロットサイズ算出: 残高={balance:.0f}JPY ATR={atr:.5f} "
+            f"SL={sl_pips:.1f}pips pip値={pip_value_jpy:.0f}JPY → {lot_size}lots "
+            f"(リスク: ¥{risk_amount:.0f} = {risk_pct*100:.2f}%)"
         )
 
         return lot_size

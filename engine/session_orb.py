@@ -2,8 +2,8 @@
 セッションORB（オープニングレンジ・ブレイクアウト）エンジン（EUR/USD H1専用チューニング）
 
 パラメータ:
-  - ロンドン開場ORB: 16:00-17:00 JST の1本目H1レンジ
-  - NY開場ORB: 21:00-22:00 JST の1本目H1レンジ
+  - ロンドン開場ORB: 10:00 サーバー時間 の1本目H1レンジ
+  - NY開場ORB: 16:00 サーバー時間 の1本目H1レンジ
   - ブレイクアウト判定: レンジの高値/安値を超えた方向
   - ATR確認: スクイーズ後のORBほど信頼度UP
 
@@ -15,6 +15,11 @@
 戦略本質:
   ロンドン/NY開場の最初の1時間は機関の方向感が出やすい。
   そのレンジをブレイクした方向にモメンタムが続く傾向がある。
+
+時刻基準: MT5サーバー時間 (EET/EEST)
+  OHLCVのdatetime列はサーバー時間。
+  London/NYのDSTとサーバーDSTが連動するため、
+  セッション時間は季節を問わず固定。
 """
 
 import numpy as np
@@ -28,9 +33,9 @@ logger = get_logger("engine.session_orb")
 
 # デフォルトパラメータ
 ATR_PERIOD = 14
-# ORBセッション時間（JST, H1足のhour）
-LONDON_ORB_HOUR = 16     # ロンドン開場 16:00 JST
-NY_ORB_HOUR = 21         # NY開場 21:00 JST
+# ORBセッション時間（サーバー時間, H1足のhour）
+LONDON_ORB_HOUR = 10     # ロンドン開場 10:00 サーバー時間
+NY_ORB_HOUR = 16         # NY開場 16:00 サーバー時間
 VOLUME_MULTIPLIER = 1.1  # ORBブレイク確認のボリューム閾値
 
 
@@ -50,7 +55,7 @@ class SessionORBEngine:
         セッションORBシグナルを算出
 
         Args:
-            df: H1足 OHLCVデータ（datetime列にJST時刻が必要）
+            df: H1足 OHLCVデータ（datetime列はMT5サーバー時間）
 
         Returns:
             float: -1.0 ~ +1.0 のシグナルスコア
@@ -74,18 +79,18 @@ class SessionORBEngine:
             if pd.isna(current_atr):
                 return 0.0
 
-            # 現在のバーの時刻を取得
+            # 現在のバーの時刻を取得（サーバー時間）
             current_bar = df.iloc[-1]
-            current_hour = self._get_jst_hour(current_bar["datetime"])
+            current_hour = self._get_server_hour(current_bar["datetime"])
             if current_hour is None:
                 return 0.0
 
-            # ロンドンORBチェック（17:00-19:00 JST = ORB直後2本）
+            # ロンドンORBチェック（11:00-12:00 サーバー時間 = ORB直後2本）
             london_signal = self._check_orb_breakout(
                 df, LONDON_ORB_HOUR, current_hour, current_atr
             )
 
-            # NY ORBチェック（22:00-24:00 JST = ORB直後2本）
+            # NY ORBチェック（17:00-18:00 サーバー時間 = ORB直後2本）
             ny_signal = self._check_orb_breakout(
                 df, NY_ORB_HOUR, current_hour, current_atr
             )
@@ -100,17 +105,14 @@ class SessionORBEngine:
             logger.error(f"セッションORB算出エラー: {e}", exc_info=True)
             return 0.0
 
-    def _get_jst_hour(self, dt) -> Optional[int]:
-        """datetime からJST時間を取得"""
+    def _get_server_hour(self, dt) -> Optional[int]:
+        """
+        datetime からサーバー時間のhourを取得
+        OHLCVのdatetimeは既にサーバー時間(EET/EEST)に変換済み
+        """
         try:
             if hasattr(dt, "hour"):
-                # MT5のdatetimeはUTCベースの場合がある
-                # config_managerでoffsetを取るべきだが、ここでは
-                # H1足のdatetimeはサーバー時刻（UTC+2 or +3）なので
-                # JST変換: +7 or +6 時間
-                # ただしdfのdatetimeはserver_timeのことが多い
-                # MT5 XMTrading: UTC+2(冬)/UTC+3(夏) → JST = +7/+6
-                return (dt.hour + 7) % 24  # 冬時間想定（UTC+2 → JST +7）
+                return dt.hour
             return None
         except Exception:
             return None
@@ -127,8 +129,8 @@ class SessionORBEngine:
 
         Args:
             df: OHLCVデータ
-            orb_hour: ORB対象の時間（JST）
-            current_jst_hour: 現在のJST時間
+            orb_hour: ORB対象の時間（サーバー時間）
+            current_jst_hour: 現在のサーバー時間
             current_atr: 現在のATR値
 
         Returns:
@@ -143,7 +145,7 @@ class SessionORBEngine:
         # ORB足（セッション開始の最初の1本）を見つける
         orb_bar = None
         for i in range(len(df) - 1, max(len(df) - 10, 0), -1):
-            bar_hour = self._get_jst_hour(df.iloc[i]["datetime"])
+            bar_hour = self._get_server_hour(df.iloc[i]["datetime"])
             if bar_hour == orb_hour:
                 orb_bar = df.iloc[i]
                 break
@@ -195,10 +197,10 @@ class SessionORBEngine:
         """現在のORB情報を取得（ダッシュボード表示用）"""
         try:
             current_bar = df.iloc[-1]
-            current_hour = self._get_jst_hour(current_bar["datetime"])
+            current_hour = self._get_server_hour(current_bar["datetime"])
 
             return {
-                "current_jst_hour": current_hour,
+                "current_server_hour": current_hour,
                 "signal_score": self.get_signal(df),
             }
         except Exception:

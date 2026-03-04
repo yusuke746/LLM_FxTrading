@@ -18,15 +18,13 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-import pytz
+from session.detector import SERVER_TZ
 
 from config_manager import get
 from database import get_trade_log
 from logger_setup import get_logger
 
 logger = get_logger("filters.entry")
-
-JST = pytz.timezone("Asia/Tokyo")
 
 
 # =====================================================
@@ -192,7 +190,7 @@ class TimePerformanceFilter:
         現在の曜日×時間帯がトレードに適しているかチェック
         
         Args:
-            current_time: 判定時刻（Noneの場合は現在時刻JST）
+            current_time: 判定時刻（Noneの場合は現在のサーバー時刻）
             
         Returns:
             dict: {"allowed": bool, "reason": str, "win_rate": float, "trade_count": int}
@@ -202,9 +200,9 @@ class TimePerformanceFilter:
 
         try:
             if current_time is None:
-                current_time = datetime.now(JST)
+                current_time = datetime.now(SERVER_TZ)
             elif current_time.tzinfo is None:
-                current_time = JST.localize(current_time)
+                current_time = SERVER_TZ.localize(current_time)
 
             day_of_week = current_time.weekday()  # 0=月, 4=金
             hour = current_time.hour
@@ -249,7 +247,7 @@ class TimePerformanceFilter:
     def _get_performance_stats(self) -> Dict[str, dict]:
         """過去トレードから曜日×時間帯別の成績を集計"""
         # 1日1回キャッシュ更新
-        now = datetime.now(JST)
+        now = datetime.now(SERVER_TZ)
         if self._cache_time and (now - self._cache_time).total_seconds() < 86400:
             return self._cache
 
@@ -268,7 +266,7 @@ class TimePerformanceFilter:
                 try:
                     entry_time = datetime.fromisoformat(entry_time_str)
                     if entry_time.tzinfo is None:
-                        entry_time = JST.localize(entry_time)
+                        entry_time = SERVER_TZ.localize(entry_time)
                 except (ValueError, TypeError):
                     continue
 
