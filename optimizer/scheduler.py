@@ -55,8 +55,8 @@ class OptimizationScheduler:
         start_time = datetime.now(JST)
 
         try:
-            # 1. 直近8週のH1データ取得
-            lookback_weeks = get("optimizer.lookback_weeks", 8)
+            # 1. 直近16週のH1データ取得
+            lookback_weeks = get("optimizer.lookback_weeks", 16)
             data = self._fetch_data(lookback_weeks)
             if data is None or len(data) < 200:
                 msg = f"データ不足: {len(data) if data is not None else 0}本"
