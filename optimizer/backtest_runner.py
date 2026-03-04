@@ -276,24 +276,24 @@ class BacktestRunner:
         idx: int,
     ) -> int:
         """
-        簡易シグナル判定（バックテスト用）
+        簡易シグナル判定（バックテスト用・7エンジン相当）
         Returns: +1(BUY), -1(SELL), 0(NONE)
         """
         signal = 0.0
 
-        # トレンドフォロー
+        # === エンジン1: トレンドフォロー ===
         if ema9 > ema21 > ema50 and adx >= 25:
             signal += 0.5
         elif ema9 < ema21 < ema50 and adx >= 25:
             signal -= 0.5
 
-        # 逆張り
+        # === エンジン2: 逆張り ===
         if rsi < 30:
             signal += 0.3
         elif rsi > 70:
             signal -= 0.3
 
-        # ブレイクアウト（簡易版）
+        # === エンジン3: ブレイクアウト ===
         if idx >= 20:
             range_high = np.max(high[idx-20:idx])
             range_low = np.min(low[idx-20:idx])
@@ -302,9 +302,64 @@ class BacktestRunner:
             elif close[idx] < range_low:
                 signal -= 0.4
 
-        if signal >= 0.6:
+        # === エンジン4: モメンタム・ダイバージェンス（簡易版） ===
+        if idx >= 10:
+            # 価格安値更新 + RSI切上がり → 強気ダイバージェンス
+            price_lower = close[idx] < np.min(close[idx-10:idx])
+            # RSIが前の安値時より高い（簡易判定）
+            if price_lower and rsi > 35 and rsi < 50:
+                signal += 0.3
+            # 価格高値更新 + RSI高値切下がり
+            price_higher = close[idx] > np.max(close[idx-10:idx])
+            if price_higher and rsi < 65 and rsi > 50:
+                signal -= 0.3
+
+        # === エンジン5: サプライ/デマンド（簡易版） ===
+        if idx >= 30:
+            # 直近30本で大きなボディのバーを探し、そのゾーンへの回帰を検出
+            atr_val = np.mean(np.abs(np.diff(close[idx-20:idx]))) * 2  # 簡易ATR
+            if atr_val > 0:
+                for lookback in range(5, min(30, idx)):
+                    body = abs(close[idx - lookback] - close[max(0, idx - lookback - 1)])
+                    if body > atr_val * 1.5:
+                        # デマンドゾーン（大陽線の起点付近まで戻ってきた）
+                        if close[idx - lookback] > close[max(0, idx - lookback - 1)]:
+                            zone_level = close[max(0, idx - lookback - 1)]
+                            if abs(close[idx] - zone_level) < atr_val * 0.5:
+                                if close[idx] > close[max(0, idx - 1)]:  # 陽線確認
+                                    signal += 0.25
+                                    break
+                        # サプライゾーン
+                        else:
+                            zone_level = close[max(0, idx - lookback - 1)]
+                            if abs(close[idx] - zone_level) < atr_val * 0.5:
+                                if close[idx] < close[max(0, idx - 1)]:
+                                    signal -= 0.25
+                                    break
+
+        # === エンジン6: マーケットストラクチャー（簡易版） ===
+        if idx >= 20:
+            # 直近のHH/HL or LL/LH パターン検出
+            recent_highs = high[idx-20:idx]
+            recent_lows = low[idx-20:idx]
+            mid = len(recent_highs) // 2
+            first_half_high = np.max(recent_highs[:mid])
+            second_half_high = np.max(recent_highs[mid:])
+            first_half_low = np.min(recent_lows[:mid])
+            second_half_low = np.min(recent_lows[mid:])
+
+            # 上昇構造 (HH + HL)
+            if second_half_high > first_half_high and second_half_low > first_half_low:
+                if close[idx] > second_half_high:  # BoS上
+                    signal += 0.2
+            # 下降構造 (LL + LH)
+            elif second_half_low < first_half_low and second_half_high < first_half_high:
+                if close[idx] < second_half_low:  # BoS下
+                    signal -= 0.2
+
+        if signal >= 0.5:
             return 1
-        elif signal <= -0.6:
+        elif signal <= -0.5:
             return -1
         return 0
 

@@ -14,6 +14,7 @@ EUR/USD H1足 デイトレード自動売買システム
 
 import argparse
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -76,6 +77,7 @@ class FXTradingBot:
         self.db_maintenance = DBMaintenance()
 
         self._last_bar_time: Optional[datetime] = None
+        self._dashboard_process: Optional[subprocess.Popen] = None
 
     def start(self):
         """メインループを開始"""
@@ -85,7 +87,19 @@ class FXTradingBot:
         self.logger.info("FX LLM Bot 起動")
         self.logger.info(f"通貨ペア: {self.symbol} | タイムフレーム: {self.timeframe}")
         self.logger.info(f"LLMフィルター: {'有効' if get('llm.enabled') else '無効'}")
-        self.logger.info(f"追加フィルター: ボラ={'ON' if get('filters.volatility_enabled', True) else 'OFF'} "
+
+        # エンジン状態
+        engines_status = (
+            f"トレンド={'ON' if get('engines.trend_enabled', True) else 'OFF'} "
+            f"逆張り={'ON' if get('engines.mean_reversion_enabled', True) else 'OFF'} "
+            f"ブレイク={'ON' if get('engines.breakout_enabled', True) else 'OFF'} "
+            f"ダイバージェンス={'ON' if get('engines.momentum_divergence_enabled', True) else 'OFF'} "
+            f"S/D={'ON' if get('engines.supply_demand_enabled', True) else 'OFF'} "
+            f"ORB={'ON' if get('engines.session_orb_enabled', True) else 'OFF'} "
+            f"構造={'ON' if get('engines.market_structure_enabled', True) else 'OFF'}"
+        )
+        self.logger.info(f"エンジン: {engines_status}")
+        self.logger.info(f"フィルター: ボラ={'ON' if get('filters.volatility_enabled', True) else 'OFF'} "
                          f"スプレッド={'ON' if get('filters.spread_enabled', True) else 'OFF'} "
                          f"時間帯={'ON' if get('filters.time_performance_enabled', True) else 'OFF'} "
                          f"アダプティブ={'ON' if get('filters.adaptive_enabled', True) else 'OFF'}")
@@ -111,6 +125,9 @@ class FXTradingBot:
             self.initial_balance = 1_000_000  # フォールバック
 
         self.notifier.send("🚀 FX LLM Bot 起動しました")
+
+        # ダッシュボードをバックグラウンドで起動
+        self._start_dashboard()
 
         # DB統計ログ
         db_stats = self.db_maintenance.get_db_stats()
@@ -147,6 +164,40 @@ class FXTradingBot:
 
         finally:
             self._shutdown()
+
+    def _start_dashboard(self):
+        """Streamlitダッシュボードをバックグラウンドで起動"""
+        try:
+            dashboard_path = Path(__file__).parent / "monitoring" / "dashboard.py"
+            if not dashboard_path.exists():
+                self.logger.warning("ダッシュボードファイルが見つかりません")
+                return
+
+            port = get("dashboard.port", 8501)
+            self._dashboard_process = subprocess.Popen(
+                [
+                    sys.executable, "-m", "streamlit", "run",
+                    str(dashboard_path),
+                    "--server.port", str(port),
+                    "--server.headless", "true",
+                    "--browser.gatherUsageStats", "false",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.logger.info(f"📊 ダッシュボード起動: http://localhost:{port}")
+        except Exception as e:
+            self.logger.warning(f"ダッシュボード起動失敗（ボットは継続）: {e}")
+
+    def _stop_dashboard(self):
+        """ダッシュボードプロセスを停止"""
+        if self._dashboard_process and self._dashboard_process.poll() is None:
+            self._dashboard_process.terminate()
+            try:
+                self._dashboard_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._dashboard_process.kill()
+            self.logger.info("ダッシュボード停止")
 
     def _main_cycle(self):
         """メインサイクル（H1足クローズごとに実行）"""
@@ -358,6 +409,7 @@ class FXTradingBot:
     def _shutdown(self):
         """安全なシャットダウン"""
         self.logger.info("シャットダウン処理開始...")
+        self._stop_dashboard()
         self.executor.shutdown()
         self.notifier.send("⏹️ FX LLM Bot を停止しました")
         self.logger.info("シャットダウン完了")

@@ -53,6 +53,15 @@ discord:
   webhook_url:          ""        # ← Discord Webhook URL
   enabled:              false
 
+engines:
+  trend_enabled:               true
+  mean_reversion_enabled:      true
+  breakout_enabled:            true
+  momentum_divergence_enabled: true
+  supply_demand_enabled:       true
+  session_orb_enabled:         true
+  market_structure_enabled:    true
+
 logging:
   level:                "INFO"
   file:                 "data/logs/trading.log"
