@@ -126,7 +126,10 @@ class RegimeDetector:
 
             # BB バンド幅
             bb = ta.bbands(close, length=20, std=2.0)
-            bb_width = (bb["BBU_20_2.0"] - bb["BBL_20_2.0"]) / bb["BBM_20_2.0"]
+            bbu = bb[[c for c in bb.columns if c.startswith("BBU_")][0]]
+            bbl = bb[[c for c in bb.columns if c.startswith("BBL_")][0]]
+            bbm = bb[[c for c in bb.columns if c.startswith("BBM_")][0]]
+            bb_width = (bbu - bbl) / bbm
             current_bb_width = bb_width.iloc[-1]
             avg_bb_width = bb_width.iloc[-50:].mean()
 

@@ -166,8 +166,8 @@ class BreakoutEngine:
         try:
             close = df["close"]
             bb = ta.bbands(close, length=BB_SQUEEZE_PERIOD, std=BB_SQUEEZE_STD)
-            bb_upper = bb[f"BBU_{BB_SQUEEZE_PERIOD}_{BB_SQUEEZE_STD}"]
-            bb_lower = bb[f"BBL_{BB_SQUEEZE_PERIOD}_{BB_SQUEEZE_STD}"]
+            bb_upper = bb[[c for c in bb.columns if c.startswith("BBU_")][0]]
+            bb_lower = bb[[c for c in bb.columns if c.startswith("BBL_")][0]]
 
             # バンド幅（%）
             bb_width = (bb_upper - bb_lower) / close

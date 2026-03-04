@@ -81,9 +81,9 @@ class MeanReversionEngine:
 
             # ボリンジャーバンド算出
             bb = ta.bbands(close, length=self.bb_period, std=self.bb_std)
-            bb_upper = bb[f"BBU_{self.bb_period}_{self.bb_std}"].iloc[-1]
-            bb_lower = bb[f"BBL_{self.bb_period}_{self.bb_std}"].iloc[-1]
-            bb_mid = bb[f"BBM_{self.bb_period}_{self.bb_std}"].iloc[-1]
+            bb_upper = bb[[c for c in bb.columns if c.startswith("BBU_")][0]].iloc[-1]
+            bb_lower = bb[[c for c in bb.columns if c.startswith("BBL_")][0]].iloc[-1]
+            bb_mid = bb[[c for c in bb.columns if c.startswith("BBM_")][0]].iloc[-1]
             current_close = close.iloc[-1]
 
             # NaN チェック
@@ -241,8 +241,8 @@ class MeanReversionEngine:
 
         return {
             "RSI": rsi.iloc[-1],
-            f"BB_Upper_{self.bb_std}σ": bb[f"BBU_{self.bb_period}_{self.bb_std}"].iloc[-1],
-            f"BB_Mid": bb[f"BBM_{self.bb_period}_{self.bb_std}"].iloc[-1],
-            f"BB_Lower_{self.bb_std}σ": bb[f"BBL_{self.bb_period}_{self.bb_std}"].iloc[-1],
+            f"BB_Upper_{self.bb_std}σ": bb[[c for c in bb.columns if c.startswith("BBU_")][0]].iloc[-1],
+            f"BB_Mid": bb[[c for c in bb.columns if c.startswith("BBM_")][0]].iloc[-1],
+            f"BB_Lower_{self.bb_std}σ": bb[[c for c in bb.columns if c.startswith("BBL_")][0]].iloc[-1],
             "Close": close.iloc[-1],
         }
