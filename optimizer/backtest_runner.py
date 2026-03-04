@@ -2,11 +2,13 @@
 バックテスト実行モジュール
 グリッドサーチ用にパラメータセットを受けてバックテストを実行
 
-EUR/USD H1足専用。セッション別エンジン重みもシミュレーションに含む。
+EUR/USD H1足専用。セッション別エンジン重み + レジームゲーティング対応。
 
-【期待値向上】ウォークフォワード最適化:
-  In-Sampleでパラメータ最適化 → Out-of-Sample で検証 を繰り返すことで
-  過学習を防止する仕組みを組み込み
+【v2変更点】
+  旧: _get_simple_signal() でライブとは別の簡易ロジック → 最適化が無意味
+  新: SignalPrecomputer で7エンジンのロジックを忠実に再現し
+      レジームゲーティング + コンフルエンス判定を含む合成シグナルを使用
+      グリッドサーチはSL/TP/BE/Trailのみ変化 → シグナルは1回計算で再利用
 """
 
 import numpy as np
@@ -30,6 +32,21 @@ class BacktestRunner:
         self.usdjpy_rate = 150.0  # バックテスト用固定レート
         self.pip_value = 10.0 * self.usdjpy_rate  # 1ロット1pip = ¥1,500
         self.max_lot = 30.0    # ロット上限
+        self._precomputed = None  # シグナル事前計算結果キャッシュ
+
+    def precompute_signals(self, df: pd.DataFrame) -> None:
+        """
+        シグナルを事前計算してキャッシュ
+        グリッドサーチ前に1回呼び出す。以降の run() はキャッシュを使用。
+        """
+        from optimizer.signal_precomputer import SignalPrecomputer
+        precomputer = SignalPrecomputer()
+        self._precomputed = precomputer.precompute(df)
+        logger.info(
+            f"シグナル事前計算完了: {len(df)}本 | "
+            f"BUYシグナル={np.sum(self._precomputed['composite_direction'] == 1)} | "
+            f"SELLシグナル={np.sum(self._precomputed['composite_direction'] == -1)}"
+        )
 
     def run(
         self,
@@ -37,6 +54,7 @@ class BacktestRunner:
         params: Dict[str, float],
         initial_balance: float = 1_000_000,  # 100万円想定
         risk_per_trade: float = 0.01,
+        precomputed: Optional[Dict] = None,
     ) -> dict:
         """
         バックテストを実行
@@ -52,6 +70,7 @@ class BacktestRunner:
             }
             initial_balance: 初期残高
             risk_per_trade: 1トレードあたりのリスク比率
+            precomputed: 事前計算済みシグナル（Noneの場合はその場で計算）
             
         Returns:
             dict: バックテスト結果
@@ -65,26 +84,23 @@ class BacktestRunner:
         tp_mult = params["tp_multiplier"]
         trail_mult = params["trail_multiplier"]
 
-        # テクニカル指標の算出
+        # テクニカル指標の算出（ATR はポジション管理にも必要）
         close = df["close"].values
         high = df["high"].values
         low = df["low"].values
-
-        # ATR
         atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
         atr = atr_series.values
 
-        # EMA（トレンド判定用簡易版）
-        ema9 = ta.ema(df["close"], length=9).values
-        ema21 = ta.ema(df["close"], length=21).values
-        ema50 = ta.ema(df["close"], length=50).values
+        # === シグナル取得 ===
+        signals = precomputed or self._precomputed
+        if signals is None:
+            # 事前計算されていない場合はその場で計算
+            from optimizer.signal_precomputer import SignalPrecomputer
+            precomputer = SignalPrecomputer()
+            signals = precomputer.precompute(df)
 
-        # RSI
-        rsi = ta.rsi(df["close"], length=14).values
-
-        # ADX
-        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
-        adx = adx_df["ADX_14"].values
+        signal_dir = signals["composite_direction"]
+        signal_score = signals["composite_score"]
 
         # バックテスト実行
         balance = initial_balance
@@ -103,21 +119,15 @@ class BacktestRunner:
         trail_sl = 0.0
 
         for i in range(60, len(df)):
-            if np.isnan(atr[i]) or np.isnan(ema9[i]) or np.isnan(ema50[i]):
+            if np.isnan(atr[i]):
                 continue
 
             current_atr = atr[i]
 
             if not in_trade:
-                # シグナル判定（簡易版）
-                signal = self._get_simple_signal(
-                    ema9[i], ema21[i], ema50[i],
-                    rsi[i], adx[i],
-                    high, low, close, i,
-                )
-
-                if signal != 0:
-                    direction = "BUY" if signal > 0 else "SELL"
+                # === プリコンピュートされた合成シグナルを使用 ===
+                if i < len(signal_dir) and signal_dir[i] != 0:
+                    direction = "BUY" if signal_dir[i] > 0 else "SELL"
                     sl_distance = current_atr * sl_mult
                     tp_distance = current_atr * tp_mult
                     sl_pips = sl_distance / self.pip
@@ -146,7 +156,7 @@ class BacktestRunner:
                     entry_bar = i
 
             else:
-                # ポジション管理
+                # ポジション管理（変更なし）
                 cur_price = close[i]
                 cur_high = high[i]
                 cur_low = low[i]
@@ -158,7 +168,7 @@ class BacktestRunner:
                         pnl_pips = (trail_sl - entry_price) / self.pip
                         pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
-                        trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar})
+                        trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar, "bar_idx": i})
                         in_trade = False
                         continue
                     # TPチェック
@@ -166,7 +176,7 @@ class BacktestRunner:
                         pnl_pips = (trade_tp - entry_price) / self.pip
                         pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
-                        trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar})
+                        trades.append({"pnl": pnl, "direction": "BUY", "bars": i - entry_bar, "bar_idx": i})
                         in_trade = False
                         continue
                 else:
@@ -175,14 +185,14 @@ class BacktestRunner:
                         pnl_pips = (entry_price - trail_sl) / self.pip
                         pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
-                        trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar})
+                        trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar, "bar_idx": i})
                         in_trade = False
                         continue
                     if cur_low <= trade_tp:
                         pnl_pips = (entry_price - trade_tp) / self.pip
                         pnl = pnl_pips * remaining_lot * self.pip_value
                         balance += pnl
-                        trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar})
+                        trades.append({"pnl": pnl, "direction": "SELL", "bars": i - entry_bar, "bar_idx": i})
                         in_trade = False
                         continue
 
@@ -231,41 +241,96 @@ class BacktestRunner:
         self,
         df: pd.DataFrame,
         params: Dict[str, float],
-        n_splits: int = 4,
+        n_splits: int = 3,
         is_ratio: float = 0.7,  # In-Sample比率
     ) -> dict:
         """
-        ウォークフォワード検証
-        データを分割し、各期間でバックテストを実行して安定性を検証
+        ウォークフォワード検証（アンカード方式）
+        
+        データを n_splits 期間に分割し、毎回 IS(前半) で最適化した
+        パラメータを OOS(後半) で検証して安定性を評価する。
+        
+        n_splits=3 の場合:
+          期間1: IS=[0-70%], OOS=[70-100%]   (1/3 スライス)
+          期間2: IS=[0-70%], OOS=[70-100%]   (2/3 スライス)
+          期間3: IS=[0-70%], OOS=[70-100%]   (全体)
         """
+        from optimizer.signal_precomputer import SignalPrecomputer
+
         total_bars = len(df)
-        split_size = total_bars // n_splits
-        results = []
+        
+        # 最低でも全体を IS/OOS に分割して比較
+        is_end = int(total_bars * is_ratio)
+        
+        if is_end < 200 or (total_bars - is_end) < 100:
+            # データ不足 → 全体でバックテストのみ
+            full_result = self.run(df, params)
+            full_result["stability_score"] = 0.5  # 不明
+            full_result["period_results"] = [full_result]
+            return full_result
 
-        for i in range(n_splits):
-            start = i * split_size
-            end = min(start + split_size, total_bars)
-            split_df = df.iloc[start:end].reset_index(drop=True)
+        # In-Sample / Out-of-Sample 分割
+        # 各分割に対してシグナルを再計算
+        precomputer = SignalPrecomputer()
 
-            if len(split_df) < 100:
-                continue
+        is_df = df.iloc[:is_end].reset_index(drop=True)
+        oos_df = df.iloc[is_end:].reset_index(drop=True)
+        
+        is_signals = precomputer.precompute(is_df)
+        oos_signals = precomputer.precompute(oos_df)
+        
+        is_result = self.run(is_df, params, precomputed=is_signals)
+        oos_result = self.run(oos_df, params, precomputed=oos_signals)
+        
+        results = [is_result, oos_result]
+        
+        # 追加分割（データ十分なら3分割でOOS検証を増やす）
+        if n_splits >= 3 and total_bars > 600:
+            split_size = total_bars // n_splits
+            for i in range(n_splits):
+                start = i * split_size
+                end = min(start + split_size, total_bars)
+                split_df = df.iloc[start:end].reset_index(drop=True)
+                if len(split_df) >= 100:
+                    split_signals = precomputer.precompute(split_df)
+                    result = self.run(split_df, params, precomputed=split_signals)
+                    if result["total_trades"] >= 3:
+                        results.append(result)
 
-            result = self.run(split_df, params)
-            results.append(result)
-
-        if not results:
+        # 有効な結果のみフィルター
+        valid_results = [r for r in results if r["total_trades"] >= 3]
+        if not valid_results:
             return self._empty_result()
 
         # 各期間の結果を集約
-        avg_sharpe = np.mean([r["sharpe_ratio"] for r in results])
-        max_dd = max(r["max_dd"] for r in results)
-        avg_pf = np.mean([r["profit_factor"] for r in results])
-        avg_winrate = np.mean([r["win_rate"] for r in results])
-        total_trades = sum(r["total_trades"] for r in results)
+        sharpes = [r["sharpe_ratio"] for r in valid_results]
+        avg_sharpe = np.mean(sharpes)
+        max_dd = max(r["max_dd"] for r in valid_results)
+        avg_pf = np.mean([r["profit_factor"] for r in valid_results])
+        avg_winrate = np.mean([r["win_rate"] for r in valid_results])
+        total_trades = sum(r["total_trades"] for r in valid_results)
 
-        # 安定性スコア（シャープレシオの標準偏差が小さいほど安定）
-        sharpe_std = np.std([r["sharpe_ratio"] for r in results])
-        stability_score = max(0, 1 - sharpe_std)
+        # 安定性スコア: OOS Sharpe / IS Sharpe（1.0に近いほど安定、過学習なし）
+        is_sharpe = is_result["sharpe_ratio"]
+        oos_sharpe = oos_result["sharpe_ratio"]
+        
+        if is_sharpe > 0 and oos_sharpe >= 0:
+            # OOS/IS 比率（1.0 = 完全安定、0.5以上なら良好）
+            stability_score = min(oos_sharpe / is_sharpe, 1.0)
+        elif is_sharpe > 0 and oos_sharpe < 0:
+            # OOSで損失 → 過学習
+            stability_score = 0.0
+        elif is_sharpe <= 0:
+            # ISですでに不良
+            stability_score = 0.0
+        else:
+            stability_score = 0.5
+
+        # CVも加味（Sharpe変動係数が小さいほど安定）
+        if len(sharpes) >= 3:
+            sharpe_cv = np.std(sharpes) / (abs(np.mean(sharpes)) + 1e-10)
+            cv_penalty = max(0, 1 - sharpe_cv)
+            stability_score = stability_score * 0.7 + cv_penalty * 0.3
 
         return {
             "sharpe_ratio": round(avg_sharpe, 4),
@@ -274,103 +339,10 @@ class BacktestRunner:
             "win_rate": round(avg_winrate, 4),
             "total_trades": total_trades,
             "stability_score": round(stability_score, 4),
-            "period_results": results,
+            "is_sharpe": round(is_sharpe, 4),
+            "oos_sharpe": round(oos_sharpe, 4),
+            "period_results": valid_results,
         }
-
-    def _get_simple_signal(
-        self,
-        ema9: float, ema21: float, ema50: float,
-        rsi: float, adx: float,
-        high: np.ndarray, low: np.ndarray, close: np.ndarray,
-        idx: int,
-    ) -> int:
-        """
-        簡易シグナル判定（バックテスト用・7エンジン相当）
-        Returns: +1(BUY), -1(SELL), 0(NONE)
-        """
-        signal = 0.0
-
-        # === エンジン1: トレンドフォロー ===
-        if ema9 > ema21 > ema50 and adx >= 25:
-            signal += 0.5
-        elif ema9 < ema21 < ema50 and adx >= 25:
-            signal -= 0.5
-
-        # === エンジン2: 逆張り ===
-        if rsi < 30:
-            signal += 0.3
-        elif rsi > 70:
-            signal -= 0.3
-
-        # === エンジン3: ブレイクアウト ===
-        if idx >= 20:
-            range_high = np.max(high[idx-20:idx])
-            range_low = np.min(low[idx-20:idx])
-            if close[idx] > range_high:
-                signal += 0.4
-            elif close[idx] < range_low:
-                signal -= 0.4
-
-        # === エンジン4: モメンタム・ダイバージェンス（簡易版） ===
-        if idx >= 10:
-            # 価格安値更新 + RSI切上がり → 強気ダイバージェンス
-            price_lower = close[idx] < np.min(close[idx-10:idx])
-            # RSIが前の安値時より高い（簡易判定）
-            if price_lower and rsi > 35 and rsi < 50:
-                signal += 0.3
-            # 価格高値更新 + RSI高値切下がり
-            price_higher = close[idx] > np.max(close[idx-10:idx])
-            if price_higher and rsi < 65 and rsi > 50:
-                signal -= 0.3
-
-        # === エンジン5: サプライ/デマンド（簡易版） ===
-        if idx >= 30:
-            # 直近30本で大きなボディのバーを探し、そのゾーンへの回帰を検出
-            atr_val = np.mean(np.abs(np.diff(close[idx-20:idx]))) * 2  # 簡易ATR
-            if atr_val > 0:
-                for lookback in range(5, min(30, idx)):
-                    body = abs(close[idx - lookback] - close[max(0, idx - lookback - 1)])
-                    if body > atr_val * 1.5:
-                        # デマンドゾーン（大陽線の起点付近まで戻ってきた）
-                        if close[idx - lookback] > close[max(0, idx - lookback - 1)]:
-                            zone_level = close[max(0, idx - lookback - 1)]
-                            if abs(close[idx] - zone_level) < atr_val * 0.5:
-                                if close[idx] > close[max(0, idx - 1)]:  # 陽線確認
-                                    signal += 0.25
-                                    break
-                        # サプライゾーン
-                        else:
-                            zone_level = close[max(0, idx - lookback - 1)]
-                            if abs(close[idx] - zone_level) < atr_val * 0.5:
-                                if close[idx] < close[max(0, idx - 1)]:
-                                    signal -= 0.25
-                                    break
-
-        # === エンジン6: マーケットストラクチャー（簡易版） ===
-        if idx >= 20:
-            # 直近のHH/HL or LL/LH パターン検出
-            recent_highs = high[idx-20:idx]
-            recent_lows = low[idx-20:idx]
-            mid = len(recent_highs) // 2
-            first_half_high = np.max(recent_highs[:mid])
-            second_half_high = np.max(recent_highs[mid:])
-            first_half_low = np.min(recent_lows[:mid])
-            second_half_low = np.min(recent_lows[mid:])
-
-            # 上昇構造 (HH + HL)
-            if second_half_high > first_half_high and second_half_low > first_half_low:
-                if close[idx] > second_half_high:  # BoS上
-                    signal += 0.2
-            # 下降構造 (LL + LH)
-            elif second_half_low < first_half_low and second_half_high < first_half_high:
-                if close[idx] < second_half_low:  # BoS下
-                    signal -= 0.2
-
-        if signal >= 0.5:
-            return 1
-        elif signal <= -0.5:
-            return -1
-        return 0
 
     def _calculate_metrics(
         self,
@@ -396,10 +368,20 @@ class BacktestRunner:
         gross_loss = abs(sum(losses)) if losses else 1
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999
 
-        # Sharpe Ratio（日次ベースで近似）
-        pnl_array = np.array(pnls)
-        if pnl_array.std() > 0:
-            sharpe = (pnl_array.mean() / pnl_array.std()) * np.sqrt(252)
+        # Sharpe Ratio（日次PnLベース: H1=24本で1日）
+        bars_per_day = 24  # H1 timeframe
+        daily_pnl = {}
+        for t in trades:
+            day_key = t.get("bar_idx", 0) // bars_per_day
+            daily_pnl[day_key] = daily_pnl.get(day_key, 0) + t["pnl"]
+        
+        if len(daily_pnl) >= 2:
+            daily_returns = np.array(list(daily_pnl.values()))
+            daily_std = daily_returns.std()
+            if daily_std > 0:
+                sharpe = (daily_returns.mean() / daily_std) * np.sqrt(252)
+            else:
+                sharpe = 0.0
         else:
             sharpe = 0.0
 

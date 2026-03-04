@@ -90,12 +90,17 @@ class OptimizationScheduler:
             wf_result = self.backtest_runner.run_walk_forward(data, best_params)
             logger.info(
                 f"ウォークフォワード検証: Sharpe={wf_result['sharpe_ratio']:.3f} "
-                f"安定性={wf_result.get('stability_score', 0):.3f}"
+                f"安定性={wf_result.get('stability_score', 0):.3f} "
+                f"IS={wf_result.get('is_sharpe', 'N/A')} "
+                f"OOS={wf_result.get('oos_sharpe', 'N/A')}"
             )
 
-            # 安定性が低い場合は警告
-            if wf_result.get("stability_score", 0) < 0.3:
-                logger.warning("ウォークフォワード安定性が低い → 過学習の可能性")
+            # 安定性が低い場合は警告（OOS/IS比率ベース）
+            stability = wf_result.get("stability_score", 0)
+            if stability < 0.3:
+                logger.warning(
+                    f"ウォークフォワード安定性が低い({stability:.3f}) → 過学習の可能性"
+                )
 
             # 4. config.yaml 更新
             update_result = self.config_updater.update(

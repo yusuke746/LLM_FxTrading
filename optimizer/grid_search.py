@@ -47,11 +47,11 @@ DEFAULT_PARAM_GRID = {
 
 def _run_single_backtest(args: Tuple) -> Tuple[dict, dict]:
     """並列実行用のラッパー関数（トップレベルで定義）"""
-    params, df_dict, initial_balance = args
+    params, df_dict, initial_balance, precomputed = args
     # DataFrameを再構築（pickleのため）
     df = pd.DataFrame(df_dict)
     runner = BacktestRunner()
-    result = runner.run(df, params, initial_balance=initial_balance)
+    result = runner.run(df, params, initial_balance=initial_balance, precomputed=precomputed)
     return params, result
 
 
@@ -107,11 +107,20 @@ class GridSearchOptimizer:
         results = []
         df_dict = df.to_dict(orient="list")
 
+        # シグナル事前計算（1回のみ、全コンボで再利用）
+        from optimizer.signal_precomputer import SignalPrecomputer
+        precomputer = SignalPrecomputer()
+        precomputed = precomputer.precompute(df)
+        logger.info(
+            f"シグナル事前計算完了: BUY={sum(precomputed['composite_direction'] == 1)} "
+            f"SELL={sum(precomputed['composite_direction'] == -1)}"
+        )
+
         # 並列実行
         if self.max_workers != 1 and valid_combinations > 10:
             try:
                 args_list = [
-                    (params, df_dict, initial_balance)
+                    (params, df_dict, initial_balance, precomputed)
                     for params in all_combinations
                 ]
 
@@ -132,9 +141,9 @@ class GridSearchOptimizer:
 
             except Exception as e:
                 logger.warning(f"並列処理失敗、逐次実行に切替: {e}")
-                results = self._run_sequential(all_combinations, df, initial_balance)
+                results = self._run_sequential(all_combinations, df, initial_balance, precomputed)
         else:
-            results = self._run_sequential(all_combinations, df, initial_balance)
+            results = self._run_sequential(all_combinations, df, initial_balance, precomputed)
 
         if not results:
             logger.warning("有効な結果がありません")
@@ -198,13 +207,14 @@ class GridSearchOptimizer:
         combinations: List[dict],
         df: pd.DataFrame,
         initial_balance: float,
+        precomputed: Optional[Dict] = None,
     ) -> List[Tuple[dict, dict, float]]:
         """逐次バックテスト実行"""
         runner = BacktestRunner()
         results = []
 
         for i, params in enumerate(combinations):
-            result = runner.run(df, params, initial_balance=initial_balance)
+            result = runner.run(df, params, initial_balance=initial_balance, precomputed=precomputed)
 
             if self._is_valid_result(result):
                 score = self._calculate_composite_score(result)

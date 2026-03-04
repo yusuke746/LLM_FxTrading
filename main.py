@@ -39,6 +39,7 @@ from optimizer.scheduler import OptimizationScheduler
 from notifier import DiscordNotifier
 from filters.entry_filters import EntryFilterManager
 from db_maintenance import DBMaintenance
+from monitoring.ic_tracker import ICTracker
 
 # グローバル停止フラグ
 _running = True
@@ -73,10 +74,12 @@ class FXTradingBot:
         self.notifier = DiscordNotifier()
         self.optimizer = OptimizationScheduler(self.executor, self.notifier)
         self.db_maintenance = DBMaintenance()
+        self.ic_tracker = ICTracker()
 
         self._last_bar_time: Optional[datetime] = None
         self._dashboard_process: Optional[subprocess.Popen] = None
         self._weekend_closed: bool = False  # 週末クローズ済みフラグ
+        self._entry_signals: dict = {}  # ticket → signal_result の一時保存
 
     def start(self):
         """メインループを開始"""
@@ -351,6 +354,9 @@ class FXTradingBot:
             )
             self.position_manager.register(managed_pos)
 
+            # IC追跡用: エントリー時のシグナルを保存
+            self._entry_signals[order_result["ticket"]] = signal_result
+
             # 通知
             self.notifier.send_trade_alert({
                 "direction": direction,
@@ -416,6 +422,19 @@ class FXTradingBot:
                     close_pnl = action.get("pnl", 0.0)
                     self.risk_manager.record_trade_result(close_pnl)
                     self.position_manager.mark_closed(action["ticket"], action.get("reason", ""))
+
+                    # IC追跡: トレード結果をエンジン別に記録
+                    entry_sig = self._entry_signals.pop(action["ticket"], None)
+                    if entry_sig:
+                        self.ic_tracker.record_trade(
+                            engine_signals=entry_sig.get("raw_signals", {}),
+                            category_scores=entry_sig.get("category_scores", {}),
+                            regime=entry_sig.get("regime", "unknown"),
+                            trade_direction=pos.direction,
+                            pnl=close_pnl,
+                            session=entry_sig.get("session", ""),
+                        )
+
                     self.notifier.send_close_alert({
                         "ticket": action["ticket"],
                         "pnl": close_pnl,
