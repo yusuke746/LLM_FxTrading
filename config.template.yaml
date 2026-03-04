@@ -1,0 +1,83 @@
+# ===========================
+# config.yaml テンプレート
+# ===========================
+# このファイルをコピーして config.yaml として使用してください
+#   cp config.template.yaml config.yaml
+# config.yaml は .gitignore で除外されているため安全です
+
+meta:
+  symbol:         "EURUSD"
+  timeframe:      "H1"
+  last_optimized: ""
+  version:        "1.2"
+  mt5_login:      0               # MT5口座番号（整数）
+  mt5_password:   ""              # MT5パスワード
+  mt5_server:     "XMTrading-MT5" # MT5サーバー名
+
+risk:
+  max_loss_per_trade:   0.01
+  sl_multiplier:        1.5
+  max_dd_pct:           20.0
+  daily_loss_limit_pct: 5.0
+  max_positions:        3
+  max_exposure_pct:     5.0
+
+position:
+  be_trigger:           1.0
+  partial_trigger:      1.2
+  partial_ratio:        0.5
+  tp_multiplier:        2.5
+  trail_multiplier:     1.0
+
+session:
+  entry_threshold:      0.6
+  event_blackout_min:   30
+
+optimizer:
+  lookback_weeks:       8
+  run_day:              "sun"
+  run_hour_jst:         7
+  max_param_change:
+    sl_multiplier:      0.5
+    tp_multiplier:      0.8
+    trail_multiplier:   0.5
+
+llm:
+  provider:             "openai"
+  model:                "gpt-4o"
+  api_key:              ""        # ← OpenAI APIキー
+  sentiment_threshold:  0.7
+  enabled:              false
+
+discord:
+  webhook_url:          ""        # ← Discord Webhook URL
+  enabled:              false
+
+logging:
+  level:                "INFO"
+  file:                 "data/logs/trading.log"
+  max_bytes:            10485760
+  backup_count:         5
+
+db_maintenance:
+  enabled:              true
+  trades_retention_days:       180   # クローズ済みトレードの保持日数
+  optimization_retention_days: 365   # 最適化履歴の保持日数
+  daily_perf_retention_days:   365   # 日次パフォーマンスの保持日数
+  vacuum_enabled:              true  # VACUUM実行（DB圧縮）
+  run_hour_jst:                6     # 実行時刻（JST）
+
+filters:
+  volatility_enabled:         true
+  volatility_lookback:        100
+  volatility_min_percentile:  10
+  spread_enabled:             true
+  spread_max_ratio:           2.5
+  normal_spread_pips:         1.6
+  time_performance_enabled:   true
+  time_min_trades:            10
+  time_min_win_rate:          0.30
+  adaptive_enabled:           true
+  adaptive_lookback_trades:   20
+  adaptive_max_adjustment:    0.1
+  adaptive_target_win_rate:   0.50

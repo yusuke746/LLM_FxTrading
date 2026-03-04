@@ -1,0 +1,63 @@
+# ===========================
+# FX LLM Bot .gitignore
+# ===========================
+
+# --- 機密情報・認証 ---
+# config.yaml には API Key, MT5パスワード, Discord Webhook が含まれる
+# テンプレートのみコミットし、実際の設定はローカルに保持
+config.yaml
+
+# --- データベース ---
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- ログ ---
+*.log
+logs/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# --- 仮想環境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# --- OS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+
+# --- バックアップ ---
+*.bak
+*.backup
+config_backup_*.yaml
+
+# --- 一時ファイル ---
+tmp*/
+*.tmp
